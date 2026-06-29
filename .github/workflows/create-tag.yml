@@ -1,0 +1,85 @@
+name: Create Release Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type OR an explicit version (e.g. v1.2.3)'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      custom_version:
+        description: 'Override: exact version to tag (e.g. v2.0.0). Overrides bump if set.'
+        required: false
+        default: ''
+
+jobs:
+  create-tag:
+    name: Compute version and push tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to push tags
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0   # full history so we see all existing tags
+
+      - name: Compute next version
+        id: version
+        run: |
+          # Use the custom_version if provided
+          if [[ -n "${{ github.event.inputs.custom_version }}" ]]; then
+            NEW_TAG="${{ github.event.inputs.custom_version }}"
+            # Ensure it starts with 'v'
+            [[ "$NEW_TAG" != v* ]] && NEW_TAG="v${NEW_TAG}"
+            echo "new_tag=${NEW_TAG}" >> "$GITHUB_OUTPUT"
+            echo "Using explicit version: ${NEW_TAG}"
+            exit 0
+          fi
+
+          # Fetch the latest semver tag (vX.Y.Z), default to v0.0.0
+          LATEST=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
+            | sort -V | tail -n 1)
+          LATEST=${LATEST:-v0.0.0}
+          echo "Latest tag: ${LATEST}"
+
+          # Strip the leading 'v'
+          VERSION="${LATEST#v}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+
+          BUMP="${{ github.event.inputs.bump }}"
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_tag=${NEW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "New tag: ${NEW_TAG}"
+
+      - name: Verify tag does not already exist
+        run: |
+          TAG="${{ steps.version.outputs.new_tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag '$TAG' already exists. Choose a different version."
+            exit 1
+          fi
+
+      - name: Create and push tag
+        run: |
+          TAG="${{ steps.version.outputs.new_tag }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" -m "Release ${TAG}"
+          git push origin "$TAG"
+          echo "::notice::Tag ${TAG} created and pushed successfully."
