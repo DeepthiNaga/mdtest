@@ -1,0 +1,40 @@
+name: List Deployed Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_env:
+        description: 'Environment to inspect'
+        required: true
+        default: 'sandbox'
+        type: choice
+        options:
+          - sandbox
+          - staging
+          - production
+
+jobs:
+  list:
+    name: Images in ${{ inputs.source_env }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch deployed images
+        run: |
+          SOURCE="${{ inputs.source_env }}"
+
+          # Replace with your real discovery command (see promote-images.yml for examples)
+          case "$SOURCE" in
+            sandbox)    IMAGES="img1,img2,img3" ;;
+            staging)    IMAGES="img1,img2,img3,img4" ;;
+            production) IMAGES="img1,img2" ;;
+          esac
+
+          echo "## Images deployed in \`${SOURCE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          IFS=',' read -ra ARR <<< "$IMAGES"
+          for img in "${ARR[@]}"; do
+            echo "- \`${img}\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Copy the names you want and paste them into the **promote-images** workflow." \
+            >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,211 @@
+name: Promote Images Between Environments
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW THE APPROVAL GATE WORKS (per-image "checkbox"):
+#   • Each of the two discovered images gets its own "Review deployments" prompt.
+#   • Reviewer sees the image name in the gate job title before deciding.
+#   • Approve  → that image is promoted.
+#   • Dismiss  → that image is skipped (its promote job is automatically skipped).
+#   • Both gates run in parallel — reviewer can approve/dismiss independently.
+#
+# ONE-TIME SETUP IN GITHUB:
+#   Settings → Environments → New environment → name it "staging" (and "production")
+#   → enable "Required reviewers" → add your team.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_env:
+        description: 'Source environment (latest 2 images are fetched from here)'
+        required: true
+        default: 'sandbox'
+        type: choice
+        options:
+          - sandbox
+          - staging
+          - production
+
+      target_env:
+        description: 'Target environment (approved images are promoted here)'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  # ── Stage 1: fetch the latest 2 images from source ───────────────────────
+  discover:
+    name: Discover latest 2 images in ${{ inputs.source_env }}
+    runs-on: ubuntu-latest
+    outputs:
+      image_1: ${{ steps.fetch.outputs.image_1 }}
+      image_2: ${{ steps.fetch.outputs.image_2 }}
+
+    steps:
+      - name: Guard — source must differ from target
+        if: inputs.source_env == inputs.target_env
+        run: |
+          echo "::error::Source and target must be different (both are '${{ inputs.source_env }}')."
+          exit 1
+
+      # ── Replace this step with your real discovery command ───────────────
+      # AWS ECR (latest 2 by push date):
+      #   aws ecr describe-images --repository-name myapp \
+      #     --query "reverse(sort_by(imageDetails,&imagePushedAt))[:2].imageTags[0]" \
+      #     --output text
+      #
+      # Kubernetes (latest 2 running image tags in a namespace):
+      #   kubectl get pods -n $SOURCE \
+      #     -o jsonpath='{range .items[*]}{.spec.containers[*].image}{"\n"}{end}' \
+      #     | sort -u | tail -2
+      #
+      # Docker registry (latest 2 tags by date):
+      #   curl -s https://registry.example.com/v2/$SOURCE/tags/list \
+      #     | jq -r '.tags | sort | last(.,.[]) | .[-2:][]'
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Fetch latest 2 deployed images from source
+        id: fetch
+        run: |
+          SOURCE="${{ inputs.source_env }}"
+          echo "Querying latest 2 images in ${SOURCE}..."
+
+          # Simulated discovery — replace with your real command above
+          # Output must set IMAGE_1 and IMAGE_2 (name:tag format)
+          case "$SOURCE" in
+            sandbox)    IMAGE_1="img3:v1.5.0"  IMAGE_2="img1:v2.1.0" ;;
+            staging)    IMAGE_1="img4:v1.0.0"  IMAGE_2="img2:v3.0.0" ;;
+            production) IMAGE_1="img1:v2.0.0"  IMAGE_2="img2:v2.9.0" ;;
+            *)          echo "::error::Unknown source: ${SOURCE}"; exit 1 ;;
+          esac
+
+          echo "image_1=${IMAGE_1}" >> "$GITHUB_OUTPUT"
+          echo "image_2=${IMAGE_2}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## :mag: Latest Images in \`${SOURCE}\`"
+            echo ""
+            echo "| Slot | Image | Your action |"
+            echo "|------|-------|-------------|"
+            echo "| 1 | \`${IMAGE_1}\` | **Approve** gate 1 to promote — **Dismiss** to skip |"
+            echo "| 2 | \`${IMAGE_2}\` | **Approve** gate 2 to promote — **Dismiss** to skip |"
+            echo ""
+            echo "> Two independent approval prompts will appear below — one per image."
+            echo "> You can approve both, one, or neither."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Stage 2a: approval gate for image 1 ──────────────────────────────────
+  gate-image-1:
+    name: "Approve to promote: ${{ needs.discover.outputs.image_1 }}"
+    needs: discover
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target_env }}   # pauses here for reviewer action
+    steps:
+      - name: Confirmed
+        run: |
+          IMAGE="${{ needs.discover.outputs.image_1 }}"
+          TARGET="${{ inputs.target_env }}"
+          echo "Gate approved by @${{ github.actor }}: ${IMAGE} → ${TARGET}"
+          {
+            echo "### :white_check_mark: Gate 1 approved"
+            echo "**Image:** \`${IMAGE}\`  →  **Target:** \`${TARGET}\`"
+            echo "**Approved by:** @${{ github.actor }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Stage 2b: approval gate for image 2 ──────────────────────────────────
+  gate-image-2:
+    name: "Approve to promote: ${{ needs.discover.outputs.image_2 }}"
+    needs: discover
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target_env }}   # independent prompt from gate-image-1
+    steps:
+      - name: Confirmed
+        run: |
+          IMAGE="${{ needs.discover.outputs.image_2 }}"
+          TARGET="${{ inputs.target_env }}"
+          echo "Gate approved by @${{ github.actor }}: ${IMAGE} → ${TARGET}"
+          {
+            echo "### :white_check_mark: Gate 2 approved"
+            echo "**Image:** \`${IMAGE}\`  →  **Target:** \`${TARGET}\`"
+            echo "**Approved by:** @${{ github.actor }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Stage 3a: promote image 1 (only if gate-image-1 was approved) ────────
+  promote-image-1:
+    name: "Promote ${{ needs.discover.outputs.image_1 }} → ${{ inputs.target_env }}"
+    needs: [discover, gate-image-1]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pull from source
+        run: |
+          IMAGE="${{ needs.discover.outputs.image_1 }}"
+          SOURCE="${{ inputs.source_env }}"
+          echo "Pulling ${IMAGE} from ${SOURCE}..."
+          # docker pull registry.example.com/${SOURCE}/${IMAGE}
+
+      - name: Re-tag and push to target
+        run: |
+          IMAGE="${{ needs.discover.outputs.image_1 }}"
+          SOURCE="${{ inputs.source_env }}"
+          TARGET="${{ inputs.target_env }}"
+          echo "Promoting ${IMAGE}: ${SOURCE} → ${TARGET}"
+          # docker tag  registry.example.com/${SOURCE}/${IMAGE} \
+          #             registry.example.com/${TARGET}/${IMAGE}
+          # docker push registry.example.com/${TARGET}/${IMAGE}
+
+      - name: Deploy
+        run: |
+          IMAGE="${{ needs.discover.outputs.image_1 }}"
+          TARGET="${{ inputs.target_env }}"
+          echo "Deploying ${IMAGE} in ${TARGET}..."
+          # kubectl set image deployment/... \
+          #   container=registry.example.com/${TARGET}/${IMAGE} -n ${TARGET}
+
+      - name: Report
+        run: |
+          echo "### :rocket: \`${{ needs.discover.outputs.image_1 }}\` promoted to \`${{ inputs.target_env }}\`" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Stage 3b: promote image 2 (only if gate-image-2 was approved) ────────
+  promote-image-2:
+    name: "Promote ${{ needs.discover.outputs.image_2 }} → ${{ inputs.target_env }}"
+    needs: [discover, gate-image-2]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pull from source
+        run: |
+          IMAGE="${{ needs.discover.outputs.image_2 }}"
+          SOURCE="${{ inputs.source_env }}"
+          echo "Pulling ${IMAGE} from ${SOURCE}..."
+          # docker pull registry.example.com/${SOURCE}/${IMAGE}
+
+      - name: Re-tag and push to target
+        run: |
+          IMAGE="${{ needs.discover.outputs.image_2 }}"
+          SOURCE="${{ inputs.source_env }}"
+          TARGET="${{ inputs.target_env }}"
+          echo "Promoting ${IMAGE}: ${SOURCE} → ${TARGET}"
+          # docker tag  registry.example.com/${SOURCE}/${IMAGE} \
+          #             registry.example.com/${TARGET}/${IMAGE}
+          # docker push registry.example.com/${TARGET}/${IMAGE}
+
+      - name: Deploy
+        run: |
+          IMAGE="${{ needs.discover.outputs.image_2 }}"
+          TARGET="${{ inputs.target_env }}"
+          echo "Deploying ${IMAGE} in ${TARGET}..."
+          # kubectl set image deployment/... \
+          #   container=registry.example.com/${TARGET}/${IMAGE} -n ${TARGET}
+
+      - name: Report
+        run: |
+          echo "### :rocket: \`${{ needs.discover.outputs.image_2 }}\` promoted to \`${{ inputs.target_env }}\`" \
+            >> "$GITHUB_STEP_SUMMARY"
